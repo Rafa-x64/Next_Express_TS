@@ -15,9 +15,3 @@ node_modules/
 .env
 *.log
 /logs
-
-#niveles
-Nivel1/
-Nivel2/
-Nivel3/
-Nivel4/
