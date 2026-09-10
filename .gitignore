@@ -1,0 +1,23 @@
+#pendejeras
+.agents/
+.claude/
+.cursor/
+.devin/
+.vscode
+
+#compilaciones
+dist/
+build/
+.exe
+
+#node y archivos
+node_modules/
+.env
+*.log
+/logs
+
+#niveles
+Nivel1/
+Nivel2/
+Nivel3/
+Nivel4/
