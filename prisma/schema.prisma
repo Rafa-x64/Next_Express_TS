@@ -62,7 +62,7 @@ model Post {
 model Category {
     id    Int    @id @default(autoincrement())
     name  String @unique
-    posts Post[] //una categoria pertenece a mas de un post
+    post Post[] //una categoria pertenece a mas de un post
 }
 
 model Comment {

@@ -532,3 +532,297 @@ pnpx tsx src/Nivel4/src/model-test.ts
 
 1. **Ampliación del Dominio (Modelo de Comentarios):** Añade un nuevo modelo llamado `Comment` a tu archivo `schema.prisma`. Debe incluir un campo `content` de tipo `String`, relacionarse con el modelo `Post` (un post tiene muchos comentarios) y con el modelo `User` (un usuario hace muchos comentarios).
 2. **Enum de Estado para Publicaciones:** Crea un `enum PostStatus` con los valores `DRAFT`, `PUBLISHED` y `ARCHIVED`. Reemplaza el campo booleano `published` en el modelo `Post` por un campo `status` que utilice este enum con valor por defecto `DRAFT`. Ejecuta `pnpx prisma migrate dev --name add_comments_and_post_status` para aplicar los cambios a la base de datos.
+
+# Nivel 4.3: Ciclo de vida de las migraciones automáticas: de desarrollo a producción
+
+¡Qué tal, mi hermano! Bienvenido al **Subnivel 4.3**. Ya sabemos cómo modelar esquemas relacionales en `schema.prisma`. Ahora toca entender cómo esos cambios se traducen de forma segura a la base de datos real sin perder datos ni romper el entorno de producción.
+
+---
+
+## Conceptos Clave
+
+Una **migración** es un control de versiones para tu base de datos (como Git, pero para tablas y columnas). Cada vez que modificas `schema.prisma`, necesitas generar un archivo SQL que registre el cambio exacto.
+
+En el ecosistema moderno de Prisma, existen 3 comandos fundamentales y debes saber exactamente cuándo usar cada uno:
+
+1. **`pnpm exec prisma migrate dev --name <nombre>` (Desarrollo local):**
+   * Compara tu `schema.prisma` con el estado actual de tu base de datos local.
+   * Genera un nuevo archivo SQL dentro de `prisma/migrations/YYYYMMDDHHMMSS_nombre/`.
+   * Aplica la migración a la base de datos local.
+   * Ejecuta automáticamente `prisma generate` para actualizar los tipos de TypeScript.
+   * Registra la migración en la tabla interna `_prisma_migrations`.
+
+2. **`pnpm exec prisma migrate deploy` (Producción / CI/CD):**
+   * **NUNCA genera archivos nuevos.**
+   * Lee la carpeta `prisma/migrations/` (que viene de Git) y aplica solo las migraciones pendientes en la base de datos de producción o staging.
+   * No modifica `schema.prisma` ni resetea la base de datos.
+
+3. **`pnpm exec prisma db push` (Prototipado rápido / Pistas de prueba):**
+   * Sincroniza directamente el `schema.prisma` con la base de datos sin crear archivos SQL de migración.
+   * Ideal para bases de datos temporales (como Supabase/Neon en desarrollo rápido) o prototipos. **No usar en producción si necesitas historial**.
+
+---
+
+## Buenas Prácticas
+
+1. **Inmutabilidad en Git:** Jamás edites un archivo SQL de migración que ya fue subido a Git y aplicado en el equipo o en producción. Si cometiste un error, haz la corrección en `schema.prisma` y genera una nueva migración.
+2. **Migraciones con SQL Personalizado (`--create-only`):** Si necesitas agregar índices especiales de PostgreSQL, disparadores (*triggers*) o vistas que Prisma no soporta declarativamente, usa el flag `--create-only`. Esto genera el archivo `.sql` para que lo edites manualmente antes de aplicarlo.
+3. **Pipelining en CI/CD:** En tu servidor de despliegue, el comando de arranque debe ser siempre `pnpm exec prisma migrate deploy` antes de iniciar el servidor Node.js.
+
+---
+
+## Ejemplos de Código
+
+### Flujo de Trabajo en Desarrollo
+
+```bash
+# 1. Validar sintaxis del esquema
+pnpm exec prisma validate
+
+# 2. Generar migración tras cambiar schema.prisma
+pnpm exec prisma migrate dev --name add_posts_and_categories
+
+# 3. Consultar el estado de las migraciones
+pnpm exec prisma migrate status
+```
+
+### Crear Migración con SQL Personalizado (`--create-only`)
+
+```bash
+# Genera el archivo SQL sin aplicarlo inmediatamente a la DB
+pnpm exec prisma migrate dev --name add_fulltext_search_index --create-only
+```
+
+Esto creará el archivo `prisma/migrations/YYYYMMDDHHMMSS_add_fulltext_search_index/migration.sql`. Puedes abrirlo y agregar SQL nativo de PostgreSQL:
+
+```sql
+-- migration.sql
+-- AlterTable original generado por Prisma...
+
+-- SQL personalizado para índice de búsqueda rápida en PostgreSQL
+CREATE INDEX IF NOT EXISTS idx_posts_title_search ON "posts" USING gin(to_tsvector('spanish', "title"));
+```
+
+Para aplicar este archivo modificado, ejecutas:
+
+```bash
+pnpm exec prisma migrate dev
+```
+
+---
+
+## Nota de Arquitectura
+
+> **Tolerancia a fallos en Despliegues:** Ejecutar `prisma migrate deploy` como un paso previo en tu contenedor de Docker (antes del comando de inicio del servidor) garantiza que el código nuevo nunca empiece a recibir tráfico si la estructura de la base de datos no está 100% actualizada.
+
+---
+
+## 🛠️ Mini-Proyecto: "Script de Verificación de Migraciones y Healthcheck"
+
+Crearemos un script de utilidad que verifique si existen migraciones pendientes o si la base de datos está desincronizada antes de arrancar la aplicación.
+
+### Código Fuente (`src/Nivel4/src/migration-check.ts`)
+
+```typescript
+import { prisma } from '../../lib/prisma.js';
+import { execSync } from 'child_process';
+
+async function checkMigrationStatus() {
+  try {
+    // Verificar conectividad básica con la tabla interna de Prisma
+    const appliedMigrations = await prisma.$queryRaw<Array<{ migration_name: string; finished_at: Date }>>`
+      SELECT migration_name, finished_at FROM _prisma_migrations WHERE finished_at IS NOT NULL ORDER BY finished_at DESC LIMIT 5;
+    `;
+
+    console.log("=== ESTADO DE MIGRACIONES APLICADAS (Últimas 5) ===");
+    appliedMigrations.forEach((m) => {
+      console.log(`✅ ${m.migration_name} - ${m.finished_at.toISOString()}`);
+    });
+  } catch (error) {
+    console.error("❌ Error al verificar la tabla de migraciones:", (error as Error).message);
+    process.exit(1);
+  } finally {
+    await prisma.$disconnect();
+  }
+}
+
+checkMigrationStatus();
+```
+
+---
+
+## 🎯 Desafíos del Nivel 4.3
+
+1. **Simulación de Migración Fallida:** Modifica un archivo `.sql` de una migración local agregando una sintaxis SQL inválida. Ejecuta `pnpm exec prisma migrate dev` y observa el mensaje de error de Prisma y cómo la tabla `_prisma_migrations` registra el fallo.
+2. **Creación de un Script de Deploy para `package.json`:** Agrega un script `"db:deploy": "prisma migrate deploy"` en tu `package.json` y pruébalo ejecutando `pnpm exec prisma migrate status` para confirmar que tu entorno local está al día.
+
+---
+---
+
+# Nivel 4.4: Operaciones CRUD avanzadas y optimización de consultas (Prevención de N+1)
+
+¡Excelente, mi hermano! Ahora que sabemos cómo mover los cambios de esquema a la base de datos de producción sin romper nada, vamos a dominar la lectura y escritura de datos con **Prisma Client**.
+
+---
+
+## Conceptos Clave
+
+### 1. Las 5 Operaciones Fundamentales del Cliente
+* **`findUnique` / `findFirst` / `findMany`**: Búsqueda por clave primaria/índice único, primer registro que coincida o lista de registros.
+* **`create` / `createMany`**: Inserción individual o masiva de registros.
+* **`update` / `updateMany`**: Actualización con filtros.
+* **`upsert`**: Modifica el registro si existe; si no existe, lo crea atómicamente en una sola operación de base de datos.
+* **`delete` / `deleteMany`**: Eliminación física.
+
+### 2. El Problema N+1 y cómo lo resuelve Prisma
+El problema **N+1** ocurre cuando consultas una lista de $N$ registros (por ejemplo, 10 usuarios) y luego, dentro de un bucle, ejecutas una consulta adicional a la base de datos por cada usuario para obtener sus publicaciones. Esto genera $1 + N$ (11) consultas a la base de datos, destruyendo el rendimiento de la red y saturando el pool de conexiones.
+
+**¿Cómo lo evita Prisma?**
+Prisma no hace consultas perezosas (*lazy loading*) automáticas en bucles. Te obliga a declarar explícitamente lo que deseas incluir mediante **`include`** o **`select`**. Internamente, Prisma une los datos mediante cláusulas `JOIN` altamente optimizadas en SQL o utiliza la estrategia de `IN (...)` combinando las peticiones en exactamente **2 consultas eficaces**.
+
+### 3. `include` vs `select` (Payloads Delgado)
+* **`include`**: Trae **todos** los campos del modelo principal + las relaciones especificadas.
+* **`select`**: Trae **únicamente** los campos que le pidas (tanto del modelo principal como de sus relaciones). **Es la opción recomendada para producción**, ya que reduce el consumo de memoria RAM en Node.js y el tráfico de red.
+
+---
+
+## Buenas Prácticas
+
+1. **Paginación por Cursor para grandes volúmenes:** Para listas con miles o millones de registros, evita la paginación tradicional basada en offset (`skip` + `take`), ya que PostgreSQL debe recorrer y descartar las filas anteriores. Usa paginación basada en cursor (`cursor` + `take`).
+2. **Usa `prisma.$transaction()` para atomicidad:** Si necesitas crear un usuario y su perfil en pasos separados o transferir saldo entre dos cuentas, envuélvelo en una transacción. Si falla algún paso, PostgreSQL devolverá todo a su estado original (*rollback*).
+
+---
+
+## Ejemplos de Código
+
+### Búsqueda Optimizada evitando N+1 con `select`
+
+```typescript
+// Consulta ultraligera: trae solo el id y nombre del usuario, y solo el título de sus posts
+const usersWithPosts = await prisma.user.findMany({
+  where: { isActive: true },
+  select: {
+    id: true,
+    name: true,
+    email: true,
+    posts: {
+      select: {
+        id: true,
+        title: true
+      }
+    }
+  },
+  take: 20 // Paginación inicial
+});
+```
+
+### Operación Atómica con `upsert` y Transacciones
+
+```typescript
+// Si el usuario existe, actualiza su nombre; si no existe, lo crea
+const user = await prisma.user.upsert({
+  where: { email: 'rafael@ejemplo.com' },
+  update: { name: 'Rafael Alvarez Refactorizado' },
+  create: {
+    email: 'rafael@ejemplo.com',
+    name: 'Rafael Alvarez',
+    role: 'ADMIN'
+  }
+});
+
+// Transacción interactiva (Atomicidad garantizada)
+const [updatedUser, newPost] = await prisma.$transaction([
+  prisma.user.update({
+    where: { id: user.id },
+    data: { isActive: true }
+  }),
+  prisma.post.create({
+    data: {
+      title: 'Transacciones atómicas en Prisma',
+      content: 'Garantizando consistencia de datos',
+      authorId: user.id
+    }
+  })
+]);
+```
+
+---
+
+## Nota de Arquitectura
+
+> **Ancho de banda e inmunidad N+1:** Proyectar campos usando `select` en lugar de `include` reduce la carga en la serialización JSON. En aplicaciones de alto tráfico, filtrar las columnas innecesarias directamente en PostgreSQL reduce el uso de memoria en el runtime hasta en un 70%.
+
+---
+
+## 🛠️ Mini-Proyecto: "Feed de Publicaciones con Paginación por Cursor"
+
+Construiremos una función de servicio optimizada para obtener un feed de noticias/posts paginado mediante cursor, sin sobrecargar la base de datos.
+
+### Código Fuente (`src/Nivel4/src/feed-service.ts`)
+
+```typescript
+import { prisma } from '../../lib/prisma.js';
+
+type FeedOptions = {
+  take?: number;
+  cursorId?: string;
+};
+
+export async function getPaginatedFeed({ take = 10, cursorId }: FeedOptions) {
+  const posts = await prisma.post.findMany({
+    take: take + 1, // Solicitamos un elemento extra para saber si hay página siguiente
+    ...(cursorId && {
+      skip: 1, // Saltamos el cursor actual
+      cursor: { id: cursorId }
+    }),
+    orderBy: { createdAt: 'desc' },
+    select: {
+      id: true,
+      title: true,
+      createdAt: true,
+      author: {
+        select: {
+          id: true,
+          name: true
+        }
+      }
+    }
+  });
+
+  let nextCursor: string | undefined = undefined;
+
+  if (posts.length > take) {
+    const nextItem = posts.pop(); // Removemos el elemento extra que usamos para el check
+    nextCursor = nextItem?.id;
+  }
+
+  return {
+    data: posts,
+    nextCursor
+  };
+}
+
+// Demostración de uso
+async function runDemo() {
+  console.log("=== CARGANDO PÁGINA 1 DEL FEED ===");
+  const page1 = await getPaginatedFeed({ take: 2 });
+  console.log("Página 1:", page1.data);
+
+  if (page1.nextCursor) {
+    console.log(`\n=== CARGANDO PÁGINA 2 (Usando cursor: ${page1.nextCursor}) ===`);
+    const page2 = await getPaginatedFeed({ take: 2, cursorId: page1.nextCursor });
+    console.log("Página 2:", page2.data);
+  }
+
+  await prisma.$disconnect();
+}
+
+runDemo();
+```
+
+---
+
+## 🎯 Desafíos del Nivel 4.4
+
+1. **Creación Masiva con `createMany`:** Crea una función que reciba un arreglo de 5 categorías y las inserte usando `prisma.category.createMany({ data: [...], skipDuplicates: true })`.
+2. **Filtro Avanzado de Búsqueda:** Construye una consulta que retorne los usuarios que tienen al menos un post publicado (`posts: { some: { published: true } }`) ordenados de forma descendente por su fecha de creación.
