@@ -1,8 +1,10 @@
 import express, { Request, Response, NextFunction } from "express"
 import { validateData } from '../src/middlewares/validateData.js'
 import { createProductSchema, CreateProductDto } from './types/product.schema.js'
+import helmet from 'helmet'
 
 const app = express()
+app.use(helmet())
 app.use(express.json())
 
 app.get('/api/health', (req: Request, res: Response) => {
